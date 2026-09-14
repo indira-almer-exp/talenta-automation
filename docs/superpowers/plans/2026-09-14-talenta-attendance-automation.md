@@ -18,7 +18,7 @@
 |---|---|
 | `requirements.txt` | Pinned dependencies (`playwright`, `pytest`) |
 | `config.json` | URLs, times, notes text, timeouts — the only file a non-programmer edits |
-| `talenta_selectors.py` | Every CSS selector / URL fragment the page flow depends on; constants only |
+| `talenta_selectors.py` | Every CSS selector / URL fragment the page flow depends on; constants only. Named `talenta_selectors`, not `selectors`, because `selectors` is a Python standard-library module that asyncio/Playwright import — shadowing it would break the program |
 | `talenta_attendance.py` | Program: `target_dates`, `parse_args`, config + logging, `DayResult`, browser steps, `submit_day`, `main` |
 | `tests/test_dates.py` | Unit tests for `target_dates`, `parse_args`, `format_result` |
 | `run_attendance.bat` | Double-click launcher (live) |
@@ -677,7 +677,7 @@ Expected: `Submitted: ...` and summary `2026-09-14  SUBMITTED`, exit code 0. In 
 - [ ] **Step 3: Confirm the duplicate path is handled**
 
 Run the same command again: `.\run_attendance.bat --only 2026-09-14`.
-Expected: `FAILED 2026-09-14: Talenta rejected the request: <Talenta's message>`, a screenshot in `logs/`, exit code 2. The browser must not hang; the summary must print.
+Expected: either `SUBMITTED` again (if Talenta allows a second pending request for the same day) or `FAILED 2026-09-14: Talenta rejected the request: <Talenta's message>` with a screenshot in `logs/` and exit code 2. Either way the browser must not hang and the summary must print.
 
 - [ ] **Step 4: Full-week run**
 
