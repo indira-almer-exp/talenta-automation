@@ -344,6 +344,8 @@ git commit -m "Add config loading, logging, DayResult and summary formatting"
 
 ### Task 4: Browser steps for one day
 
+> Note: the code below was hardened after code review (commits c164f0e, 90f68d9 and later). The repository is authoritative; the signatures Task 5 uses reflect the hardened versions.
+
 These functions talk to the live page and are verified in Task 6's dry run rather than by unit tests. Each raises `DayFailure` with a human-readable reason when something is wrong.
 
 **Files:**
@@ -531,8 +533,8 @@ def submit_day(page: Page, day: date, config: dict, dry_run: bool, log: logging.
     log.info("=== %s ===", day.isoformat())
     timeout_ms = config["action_timeout_seconds"] * 1_000
     try:
-        goto_attendance(page, config, log)
-        open_request_modal(page)
+        goto_attendance(page, config, log, timeout_ms)
+        open_request_modal(page, timeout_ms)
         set_effective_date(page, day, timeout_ms)
         verify_prefilled(page, day, timeout_ms)
         fill_times_and_notes(page, config)
@@ -541,7 +543,7 @@ def submit_day(page: Page, day: date, config: dict, dry_run: bool, log: logging.
             return DayResult(day, "DRY_RUN")
         reply = click_submit(page, timeout_ms)
         if reply.get("result") == "OK":
-            wait_for_reload(page, timeout_ms)
+            wait_for_reload(page, timeout_ms, log)
             log.info("Submitted: %s", reply.get("errorMsg", ""))
             return DayResult(day, "SUBMITTED")
         raise DayFailure(f"Talenta rejected the request: {reply.get('errorMsg', reply)}")
