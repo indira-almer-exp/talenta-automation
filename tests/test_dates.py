@@ -44,7 +44,10 @@ def test_format_result_success_has_no_trailing_noise():
 
 
 def test_format_result_failure_includes_reason_and_screenshot():
-    result = DayResult(TUE, "FAILED", "Shift dropdown stayed empty", Path("logs/fail_2026-09-15.png"))
-    assert format_result(result) == (
-        "2026-09-15  FAILED      Shift dropdown stayed empty  logs\\fail_2026-09-15.png"
-    )
+    shot = Path("logs/fail_2026-09-15.png")
+    result = DayResult(TUE, "FAILED", "Shift dropdown stayed empty", shot)
+    assert format_result(result) == f"2026-09-15  FAILED      Shift dropdown stayed empty  {shot}"
+
+
+def test_format_result_dry_run_aligns_like_other_statuses():
+    assert format_result(DayResult(WED, "DRY_RUN")) == "2026-09-16  DRY_RUN"

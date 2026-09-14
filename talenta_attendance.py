@@ -52,7 +52,10 @@ def setup_logger() -> logging.Logger:
     logger = logging.getLogger("talenta")
     logger.setLevel(logging.DEBUG)
     logger.handlers.clear()
+    logger.propagate = False
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%H:%M:%S")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(logging.INFO)
     console.setFormatter(fmt)
