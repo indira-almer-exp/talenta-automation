@@ -84,7 +84,7 @@ Steps, using the selectors in section 5:
    immediately or after the button wait times out - call `wait_for_login`
    again, then retry `goto` once. Still on the login page after that: failure.
 2. Click `REQUEST_BUTTON`; wait for `MODAL` to be visible.
-3. Click `ATTENDANCE_RADIO_LABEL`.
+3. Click `ATTENDANCE_RADIO_LABEL`; poll until `ATTENDANCE_RADIO` is checked.
 4. Set the effective date by evaluating in the page:
    `$(SEL).pickadate('picker').set('select', new Date(y, m-1, d))`.
    This updates the visible field, the hidden `datepicker_request_submit`
@@ -109,7 +109,8 @@ Steps, using the selectors in section 5:
      validation toasts vanish after ~3 s), and set a `window.__talentaSubmitted`
      marker on the current document.
    - Register a `page.route` for `/attendance/save-request` whose handler does
-     `route.fetch()`, records status and body, then `route.fulfill()`s the page.
+     `route.fetch()` (bounded at twice the action timeout), records status and
+     body, then `route.fulfill()`s the page.
      The body must be captured this way because Talenta calls
      `location.reload()` the instant it receives OK and Chromium may discard
      the response before it could be read afterwards. If `route.fetch()`
@@ -181,7 +182,7 @@ rather than interacting with them visually, and clicks labels for radios.
 
 | Situation | Behaviour |
 |---|---|
-| `config.json` missing, malformed, or missing a key | Friendly one-line message, exit 1, no browser opened |
+| `config.json` missing, malformed, missing a key, or a timeout that is not a positive number | Friendly one-line message, exit 1, no browser opened |
 | Login not completed in 10 min | Exit 1, nothing submitted |
 | Session expires mid-run | Wait for re-login (10 min), retry the same date once |
 | Any per-day failure (selector missing, verification mismatch, Talenta rejection, timeout) | Screenshot + log + cancel modal, continue to next date |
