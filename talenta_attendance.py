@@ -251,16 +251,16 @@ def click_submit(page: Page, timeout_ms: int) -> dict:
     the instant it gets an OK, which can discard the body before we could read
     it afterwards. The toast observer is armed first because validation toasts
     vanish after ~3 s, and the document marker lets wait_for_reload tell the
-    old document from the reloaded one. Once `captured["sent"]` is set the POST
+    old document from the reloaded one. Once captured["sent"] is set the POST
     has left the browser, so any failure after that must not be reported as
-    "not submitted".
+    "not submitted"; a reply that arrives after our wait is still used.
     """
     captured: dict = {}
 
     def capture(route) -> None:
         captured["sent"] = True
         try:
-            response = route.fetch()
+            response = route.fetch(timeout=timeout_ms * 2)
         except Exception:
             captured["lost"] = True
             route.abort()
@@ -277,20 +277,25 @@ def click_submit(page: Page, timeout_ms: int) -> dict:
     page.evaluate(CAPTURE_TOAST_JS, sel.TOAST)
     page.evaluate(MARK_DOCUMENT_JS)
     page.route(is_save_request, capture)
+    timed_out: PlaywrightTimeout | None = None
     try:
         with page.expect_response(lambda r: is_save_request(r.url), timeout=timeout_ms):
             page.click(sel.SUBMIT_BUTTON, timeout=timeout_ms)
     except PlaywrightTimeout as exc:
+        timed_out = exc
+    finally:
+        # Removing the route while route.fetch() is still pending lets Chromium
+        # release the original request as well, i.e. the POST would go out twice.
+        page.unroute_all(behavior="wait")
+    if "body" not in captured:
         toast = page.evaluate("() => window.__talentaToast")
         if not captured.get("sent"):
-            raise DayFailure(f"Submit did not go through: {toast or 'no message shown'}") from exc
+            raise DayFailure(f"Submit did not go through: {toast or 'no message shown'}") from timed_out
         detail = f"Talenta said: {toast}" if toast else "no reply within the time limit"
-        raise DayFailure(f"{UNKNOWN_RESULT} ({detail})") from exc
-    finally:
-        page.unroute(is_save_request, capture)
+        raise DayFailure(f"{UNKNOWN_RESULT} ({detail})") from timed_out
     try:
         reply = json.loads(captured["body"])
-    except (KeyError, json.JSONDecodeError) as exc:
+    except json.JSONDecodeError as exc:
         status = captured.get("status", "?")
         raise DayFailure(f"{UNKNOWN_RESULT} (HTTP {status} without a readable result)") from exc
     if not isinstance(reply, dict):
