@@ -288,7 +288,7 @@ def record_failure(page: Page, day: date, reason: str, log: logging.Logger) -> D
     log.error("FAILED %s: %s", day.isoformat(), reason)
     screenshot: Path | None = LOG_DIR / f"fail_{day.isoformat()}.png"
     try:
-        page.screenshot(path=str(screenshot), full_page=True)
+        page.screenshot(path=str(screenshot), full_page=True, timeout=5_000)
     except Exception:
         screenshot = None
     try:
@@ -314,9 +314,10 @@ def submit_day(page: Page, day: date, config: dict, dry_run: bool, log: logging.
         reply = click_submit(page, timeout_ms)
         if reply.get("result") == "OK":
             wait_for_reload(page, timeout_ms, log)
-            log.info("Submitted: %s", first_line(str(reply.get("errorMsg", ""))))
+            note = first_line(str(reply.get("errorMsg", "")))
+            log.info("Submitted%s", f": {note}" if note else "")
             return DayResult(day, "SUBMITTED")
-        rejection = first_line(str(reply.get("errorMsg") or reply))
+        rejection = first_line(str(reply.get("errorMsg") or reply))[:200]
         raise DayFailure(f"Talenta rejected the request: {rejection}")
     except LoginTimeout:
         raise
@@ -324,7 +325,21 @@ def submit_day(page: Page, day: date, config: dict, dry_run: bool, log: logging.
         return record_failure(page, day, str(exc), log)
     except Exception as exc:
         log.debug("Traceback for %s", day.isoformat(), exc_info=True)
-        return record_failure(page, day, f"{type(exc).__name__}: {first_line(str(exc))}", log)
+        detail = first_line(str(exc))
+        reason = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+        return record_failure(page, day, reason, log)
+
+
+REQUIRED_CONFIG_KEYS = (
+    "login_url",
+    "dashboard_url",
+    "attendance_url",
+    "check_in",
+    "check_out",
+    "notes",
+    "login_timeout_minutes",
+    "action_timeout_seconds",
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -334,6 +349,10 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, json.JSONDecodeError) as exc:
         print(f"Could not read config.json: {exc}")
         return 1
+    missing = [key for key in REQUIRED_CONFIG_KEYS if key not in config]
+    if missing:
+        print(f"config.json is missing: {', '.join(missing)}")
+        return 1
     log = setup_logger()
     dates = args.only or target_dates(date.today())
     log.info("Target dates: %s", ", ".join(d.isoformat() for d in dates))
@@ -342,27 +361,35 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[DayResult] = []
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False)
-        page = browser.new_page()
-        page.set_default_timeout(config["action_timeout_seconds"] * 1_000)
+        browser = None
         try:
+            browser = playwright.chromium.launch(headless=False)
+            page = browser.new_page()
+            page.set_default_timeout(config["action_timeout_seconds"] * 1_000)
             page.goto(config["login_url"])
             wait_for_login(page, config, log)
             for day in dates:
-                result = submit_day(page, day, config, args.dry_run, log)
-                results.append(result)
-                if result.status == "DRY_RUN":
+                results.append(submit_day(page, day, config, args.dry_run, log))
+                if results[-1].status == "DRY_RUN" and sys.stdin.isatty():
                     input("  Inspect the filled form in the browser, then press Enter to continue... ")
+                if page.is_closed():
+                    log.error("The browser window was closed - stopping.")
+                    break
         except LoginTimeout as exc:
-            log.error("%s. Nothing was submitted.", exc)
+            if results:
+                log.error("%s. Stopping - see the summary for what was already submitted.", exc)
+            else:
+                log.error("%s. Nothing was submitted.", exc)
             return 1
         except Exception:
             log.exception("Unexpected error - stopping.")
             return 1
         finally:
-            browser.close()
+            if browser is not None:
+                browser.close()
+            if results:
+                print_summary(results, log)
 
-    print_summary(results, log)
     return 0 if all(r.status != "FAILED" for r in results) else 2
 
 
