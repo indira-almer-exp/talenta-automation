@@ -1,0 +1,10 @@
+{
+  "login_url": "https://account.mekari.com/users/sign_in?client_id=TAL-73645&return_to=L2F1dGg_Y2xpZW50X2lkPVRBTC03MzY0NSZyZXNwb25zZV90eXBlPWNvZGUmc2NvcGU9c3NvOnByb2ZpbGU%3D",
+  "dashboard_url": "https://hr.talenta.co/employee/dashboard",
+  "attendance_url": "https://hr.talenta.co/my-info/attendance?id=3345449",
+  "check_in": "08:30",
+  "check_out": "18:00",
+  "notes": " ",
+  "login_timeout_minutes": 10,
+  "action_timeout_seconds": 15
+}
