@@ -34,9 +34,9 @@ All inside `C:\Users\indiraa\Desktop\Talenta Automation\`.
 | `config.json` | `login_url`, `attendance_url`, `dashboard_url`, `check_in`, `check_out`, `notes`, `login_timeout_minutes` (10), `action_timeout_seconds` (15) |
 | `requirements.txt` | `playwright>=1.58`, `pytest` |
 | `pyproject.toml` | pytest configuration only (`pythonpath = ["."]`, `testpaths = ["tests"]`) so bare `pytest` works; not a packaging manifest |
-| `tests/test_dates.py` | Unit tests for the date-range function |
+| `tests/` | `test_dates.py` (week logic, CLI parsing, summary formatting), `test_submit_day.py` (reply handling with the browser steps stubbed), `test_main.py` (exit codes and summary-on-abort with a stub Playwright), `test_goto_attendance.py` (session-expiry retry) |
 | `logs/` | Created on demand; git-ignored. `run_YYYY-MM-DD_HHMMSS.log` plus `fail_YYYY-MM-DD.png` per failed day |
-| `.gitignore` | `logs/`, `__pycache__/`, `.pytest_cache/` |
+| `.gitignore` | `logs/`, `__pycache__/`, `.pytest_cache/`, `.claude/settings.local.json` |
 
 ## 4. Program flow
 
@@ -44,16 +44,17 @@ All inside `C:\Users\indiraa\Desktop\Talenta Automation\`.
 main()
  ├─ parse args: --dry-run, --only YYYY-MM-DD (repeatable)
  ├─ load config.json
- ├─ dates = target_dates(today) or the --only list
+ ├─ dates = target_dates(today), or the --only list with duplicates removed
  ├─ open logger (console + logs/run_*.log)
  ├─ launch Chromium (headless=False), new page, default timeout = action_timeout
  ├─ goto login_url
- ├─ wait_for_login(page): wait until URL starts with dashboard_url, up to login_timeout
+ ├─ wait_for_login(page, config, log): wait until URL starts with dashboard_url, up to login_timeout
  ├─ for date in dates:
- │     result = submit_day(page, date, config, dry_run)   # never raises
+ │     result = submit_day(page, date, config, dry_run, log)   # raises only LoginTimeout
  │     results.append(result)
- ├─ print summary table (date, status, reason)
- └─ close browser (in dry-run: leave open until Enter pressed)
+ │     stop if the browser window was closed; in dry-run, pause for Enter after each date
+ ├─ print summary table (date, status, reason) - on every exit path, before closing the browser
+ └─ close browser
 ```
 
 ### 4.1 `target_dates(today: date) -> list[date]`
@@ -62,11 +63,14 @@ Pure function. `monday = today - timedelta(days=today.weekday())`. Last day is
 `today` if `today.weekday() <= 4`, otherwise `monday + 4 days`. Returns the
 inclusive list from `monday` to that last day.
 
-### 4.2 `wait_for_login(page)`
+### 4.2 `wait_for_login(page, config, log, ready=None)`
 
-`page.wait_for_url(lambda url: url.startswith(dashboard_url), timeout=login_timeout)`.
-On timeout: log "Login not completed within N minutes", close browser, exit code 1.
-Nothing has been submitted at this point.
+`page.wait_for_url(ready, timeout=login_timeout)` where `ready` defaults to
+`url.startswith(dashboard_url)`. On timeout at startup: log "Login not completed
+within N minutes. Nothing was submitted.", close browser, exit code 1. The
+mid-run re-login (section 4.3 step 1) passes a `ready` that accepts any URL on
+the Talenta host, because Mekari sends the user back to the attendance page,
+not the dashboard.
 
 ### 4.3 `submit_day(page, date, config, dry_run) -> DayResult`
 
@@ -76,8 +80,9 @@ Nothing has been submitted at this point.
 Steps, using the selectors in section 5:
 
 1. `page.goto(attendance_url)`; wait for `REQUEST_BUTTON` to be visible.
-   If the URL lands on the login page instead (session expired), call
-   `wait_for_login` again, then retry `goto` once.
+   If the URL lands on `account.mekari.com` instead (session expired) - either
+   immediately or after the button wait times out - call `wait_for_login`
+   again, then retry `goto` once. Still on the login page after that: failure.
 2. Click `REQUEST_BUTTON`; wait for `MODAL` to be visible.
 3. Click `ATTENDANCE_RADIO_LABEL`.
 4. Set the effective date by evaluating in the page:
@@ -91,7 +96,7 @@ Steps, using the selectors in section 5:
    - hidden `datepicker_request_submit` value == `YYYY-MM-DD`
    - `SHIFT_SELECT` value is non-empty
    - `CHECKIN_DATE_SELECT` and `CHECKOUT_DATE_SELECT` values == `YYYY-MM-DD`
-   - `CHECKIN_BOX` and `CHECKOUT_BOX` are checked
+   - `CHECKIN_BOX` and `CHECKOUT_BOX` are checked (also polled)
    Any mismatch after the timeout is a failure with a descriptive reason
    (for example "Shift dropdown stayed empty — probably a day off").
 6. `fill(CHECKIN_TIME, "08:30")`, `fill(CHECKOUT_TIME, "18:00")`; read back
@@ -99,11 +104,27 @@ Steps, using the selectors in section 5:
    mangled them).
 7. `fill(NOTES, " ")`.
 8. If `dry_run`: return `DRY_RUN`, leave the modal open, do not click Submit.
-9. Otherwise, inside `page.expect_response(url contains "save-request")`,
-   click `SUBMIT_BUTTON`. Parse the JSON body:
-   - `result == "OK"` → the page reloads itself; `page.wait_for_load_state()`;
-     return `SUBMITTED`.
-   - anything else → return `FAILED` with `errorMsg` as the reason.
+9. Otherwise submit, reading Talenta's own JSON answer rather than the screen:
+   - Arm a `MutationObserver` that records the newest toast text (Talenta's
+     validation toasts vanish after ~3 s), and set a `window.__talentaSubmitted`
+     marker on the current document.
+   - Register a `page.route` for `/attendance/save-request` whose handler does
+     `route.fetch()`, records status and body, then `route.fulfill()`s the page.
+     The body must be captured this way because Talenta calls
+     `location.reload()` the instant it receives OK and Chromium may discard
+     the response before it could be read afterwards. If `route.fetch()`
+     itself fails the handler `abort()`s so the POST is never re-sent.
+   - Click `SUBMIT_BUTTON` inside `page.expect_response(...)`.
+   - `result == "OK"` → wait until the marker is gone (the reload happened) and
+     the new document is loaded; if that never happens, log a warning and still
+     return `SUBMITTED` (the OK reply already proved acceptance).
+   - any other JSON → `FAILED` with the first line of `errorMsg` as the reason.
+   - Timeout with the POST never sent (client-side validation) → `FAILED`,
+     "Submit did not go through: <toast text>".
+   - Timeout after the POST was sent, or a reply that is not a JSON object →
+     `FAILED` with "Submit result unknown - check Talenta's request history
+     before rerunning this date (...)". The tool never claims "not submitted"
+     once the request has left the browser.
 10. Any exception or failed verification: take a full-page screenshot to
     `logs/fail_YYYY-MM-DD.png`, log the traceback, try to click
     `CANCEL_BUTTON` (ignore errors), return `FAILED`. The loop continues with
@@ -118,7 +139,11 @@ Printed at the end and written to the log, one line per date:
 2026-09-15  FAILED     Attendance already exists   logs/fail_2026-09-15.png
 ```
 
-Exit code 0 if every date is `SUBMITTED`/`DRY_RUN`, 2 if any failed.
+Exit code 0 if every date is `SUBMITTED`/`DRY_RUN`; 2 if any failed or the
+run stopped early (browser window closed); 1 if the run aborted before the
+loop finished for another reason (login timeout, unreadable `config.json`,
+unexpected error). The summary is printed on every exit path that attempted
+at least one date, so the user always sees what was already submitted.
 
 ## 5. Selectors (`talenta_selectors.py`)
 
@@ -152,10 +177,13 @@ rather than interacting with them visually, and clicks labels for radios.
 
 | Situation | Behaviour |
 |---|---|
+| `config.json` missing, malformed, or missing a key | Friendly one-line message, exit 1, no browser opened |
 | Login not completed in 10 min | Exit 1, nothing submitted |
 | Session expires mid-run | Wait for re-login (10 min), retry the same date once |
 | Any per-day failure (selector missing, verification mismatch, Talenta rejection, timeout) | Screenshot + log + cancel modal, continue to next date |
-| Every browser action | 15 s timeout via Playwright default timeout |
+| Reply to Submit not received in time, or unreadable, after the POST was sent | `FAILED` with "Submit result unknown - check Talenta's request history before rerunning this date" |
+| Browser window closed by the user mid-run | Stop, print summary, exit 2 |
+| Every browser action | 15 s timeout, passed explicitly |
 | Unexpected exception outside the per-day loop | Logged with traceback, browser closed, exit 1 |
 
 ## 7. Testing

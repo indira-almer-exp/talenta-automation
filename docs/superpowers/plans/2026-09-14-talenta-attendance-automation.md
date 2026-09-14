@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-14-talenta-attendance-automation-design.md`
 
+> **Status:** Tasks 1-6 implemented and reviewed on branch `feature/attendance-automation`. The code blocks in Tasks 4 and 5 were hardened through several review rounds after this plan was written; the repository and the spec are authoritative, this plan is the historical record. Task 7 (live verification) is performed by the user.
+
 ---
 
 ## File structure
