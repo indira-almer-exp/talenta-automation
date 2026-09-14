@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -93,6 +94,9 @@ def print_summary(results: list[DayResult], log: logging.Logger) -> None:
         log.info(format_result(result))
 
 
+# ---- Browser steps (verified against the live page by the dry run) ----
+
+
 class LoginTimeout(Exception):
     """The user did not reach the dashboard in time. Aborts the whole run."""
 
@@ -101,24 +105,40 @@ class DayFailure(Exception):
     """One date could not be submitted. The run continues with the next date."""
 
 
-def wait_for_login(page: Page, config: dict, log: logging.Logger) -> None:
+def wait_for_login(
+    page: Page,
+    config: dict,
+    log: logging.Logger,
+    ready: Callable[[str], bool] | None = None,
+) -> None:
+    """Block until the user has logged in; `ready` decides which URL counts as logged in."""
     minutes = config["login_timeout_minutes"]
     dashboard = config["dashboard_url"]
+    if ready is None:
+        def ready(url: str) -> bool:
+            return url.startswith(dashboard)
     log.info("Please log in in the browser window (waiting up to %s minutes)...", minutes)
     try:
-        page.wait_for_url(lambda url: url.startswith(dashboard), timeout=minutes * 60_000)
+        page.wait_for_url(ready, timeout=minutes * 60_000)
     except PlaywrightTimeout as exc:
         raise LoginTimeout(f"Login not completed within {minutes} minutes") from exc
     log.info("Logged in.")
 
 
 def goto_attendance(page: Page, config: dict, log: logging.Logger) -> None:
-    page.goto(config["attendance_url"])
-    if sel.LOGIN_HOST in page.url:
-        log.warning("Session expired - please log in again.")
-        wait_for_login(page, config, log)
+    for attempt in (1, 2):
         page.goto(config["attendance_url"])
-    page.wait_for_selector(sel.REQUEST_BUTTON, state="visible")
+        if sel.LOGIN_HOST not in page.url:
+            try:
+                page.wait_for_selector(sel.REQUEST_BUTTON, state="visible")
+                return
+            except PlaywrightTimeout as exc:
+                if sel.LOGIN_HOST not in page.url:
+                    raise DayFailure("The attendance page did not load (no Request button)") from exc
+        if attempt == 2:
+            raise DayFailure("Still on the login page after logging in again")
+        log.warning("Session expired - please log in again.")
+        wait_for_login(page, config, log, ready=lambda url: sel.LOGIN_HOST not in url)
 
 
 def open_request_modal(page: Page) -> None:
@@ -141,15 +161,21 @@ def set_effective_date(page: Page, day: date, timeout_ms: int) -> None:
     page's change handler, which POSTs get-current-shift and then fills the
     Shift and Check In/Out date dropdowns itself.
     """
-    with page.expect_response(lambda r: sel.SHIFT_LOOKUP_PATH in r.url, timeout=timeout_ms):
-        page.evaluate(SET_DATE_JS, [sel.EFFECTIVE_DATE, day.year, day.month, day.day])
+    try:
+        with page.expect_response(lambda r: sel.SHIFT_LOOKUP_PATH in r.url, timeout=timeout_ms):
+            page.evaluate(SET_DATE_JS, [sel.EFFECTIVE_DATE, day.year, day.month, day.day])
+    except PlaywrightTimeout as exc:
+        raise DayFailure(f"Talenta did not look up a shift for {day.isoformat()}") from exc
 
 
 def _expect_value(page: Page, selector: str, expected: str, what: str, timeout_ms: int) -> None:
     try:
         expect(page.locator(selector)).to_have_value(expected, timeout=timeout_ms)
     except AssertionError as exc:
-        actual = page.locator(selector).input_value()
+        try:
+            actual = page.locator(selector).input_value(timeout=1_000)
+        except Exception:
+            actual = "(field not found)"
         raise DayFailure(f"{what} is '{actual}', expected '{expected}'") from exc
 
 
@@ -179,19 +205,40 @@ def fill_times_and_notes(page: Page, config: dict) -> None:
     page.fill(sel.NOTES, config["notes"])
 
 
+CAPTURE_TOAST_JS = """() => {
+    window.__talentaToast = null;
+    new MutationObserver(() => {
+        const el = document.querySelector('#toast-container .toast');
+        if (el && !window.__talentaToast) window.__talentaToast = el.innerText.trim();
+    }).observe(document.body, {childList: true, subtree: true});
+}"""
+
+MARK_DOCUMENT_JS = "() => { window.__talentaSubmitted = true; }"
+
+
 def click_submit(page: Page, timeout_ms: int) -> dict:
-    """Click Submit and return Talenta's JSON reply ({"result": "OK", "errorMsg": ...})."""
+    """Click Submit and return Talenta's JSON reply ({"result": "OK", "errorMsg": ...}).
+
+    The toast observer is armed first because Talenta's validation toasts vanish
+    after ~3 s, long before our timeout; the document marker lets wait_for_reload
+    tell the old document from the reloaded one.
+    """
+    page.evaluate(CAPTURE_TOAST_JS)
+    page.evaluate(MARK_DOCUMENT_JS)
     try:
         with page.expect_response(lambda r: sel.SAVE_REQUEST_PATH in r.url, timeout=timeout_ms) as info:
             page.click(sel.SUBMIT_BUTTON)
     except PlaywrightTimeout as exc:
-        toast = page.locator(sel.TOAST).first
-        message = toast.inner_text().strip() if toast.count() else "no reply from Talenta"
+        message = page.evaluate("() => window.__talentaToast") or "no reply from Talenta"
         raise DayFailure(f"Submit did not go through: {message}") from exc
-    return info.value.json()
+    response = info.value
+    try:
+        return response.json()
+    except Exception as exc:
+        raise DayFailure(f"Talenta replied HTTP {response.status}, not JSON") from exc
 
 
 def wait_for_reload(page: Page, timeout_ms: int) -> None:
     """On success Talenta calls location.reload(); wait until the fresh page is up."""
-    page.wait_for_selector(sel.MODAL, state="hidden", timeout=timeout_ms)
+    page.wait_for_function("() => !window.__talentaSubmitted", timeout=timeout_ms)
     page.wait_for_load_state("load")
