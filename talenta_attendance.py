@@ -277,3 +277,94 @@ def wait_for_reload(page: Page, timeout_ms: int, log: logging.Logger) -> None:
         page.wait_for_load_state("load", timeout=timeout_ms)
     except PlaywrightTimeout:
         log.warning("Talenta accepted the request but the page did not refresh; continuing.")
+
+
+def first_line(text: str) -> str:
+    text = text.strip()
+    return text.splitlines()[0] if text else ""
+
+
+def record_failure(page: Page, day: date, reason: str, log: logging.Logger) -> DayResult:
+    log.error("FAILED %s: %s", day.isoformat(), reason)
+    screenshot: Path | None = LOG_DIR / f"fail_{day.isoformat()}.png"
+    try:
+        page.screenshot(path=str(screenshot), full_page=True)
+    except Exception:
+        screenshot = None
+    try:
+        page.click(sel.CANCEL_BUTTON, timeout=2_000)
+    except Exception:
+        pass
+    return DayResult(day, "FAILED", reason, screenshot)
+
+
+def submit_day(page: Page, day: date, config: dict, dry_run: bool, log: logging.Logger) -> DayResult:
+    """Submit one date. Never raises except LoginTimeout, which aborts the run."""
+    log.info("=== %s ===", day.isoformat())
+    timeout_ms = config["action_timeout_seconds"] * 1_000
+    try:
+        goto_attendance(page, config, log, timeout_ms)
+        open_request_modal(page, timeout_ms)
+        set_effective_date(page, day, timeout_ms)
+        verify_prefilled(page, day, timeout_ms)
+        fill_times_and_notes(page, config)
+        if dry_run:
+            log.info("Form filled; Submit NOT clicked (dry run).")
+            return DayResult(day, "DRY_RUN")
+        reply = click_submit(page, timeout_ms)
+        if reply.get("result") == "OK":
+            wait_for_reload(page, timeout_ms, log)
+            log.info("Submitted: %s", first_line(str(reply.get("errorMsg", ""))))
+            return DayResult(day, "SUBMITTED")
+        rejection = first_line(str(reply.get("errorMsg") or reply))
+        raise DayFailure(f"Talenta rejected the request: {rejection}")
+    except LoginTimeout:
+        raise
+    except DayFailure as exc:
+        return record_failure(page, day, str(exc), log)
+    except Exception as exc:
+        log.debug("Traceback for %s", day.isoformat(), exc_info=True)
+        return record_failure(page, day, f"{type(exc).__name__}: {first_line(str(exc))}", log)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        config = load_config()
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read config.json: {exc}")
+        return 1
+    log = setup_logger()
+    dates = args.only or target_dates(date.today())
+    log.info("Target dates: %s", ", ".join(d.isoformat() for d in dates))
+    if args.dry_run:
+        log.info("DRY RUN - Submit will not be clicked.")
+
+    results: list[DayResult] = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=False)
+        page = browser.new_page()
+        page.set_default_timeout(config["action_timeout_seconds"] * 1_000)
+        try:
+            page.goto(config["login_url"])
+            wait_for_login(page, config, log)
+            for day in dates:
+                result = submit_day(page, day, config, args.dry_run, log)
+                results.append(result)
+                if result.status == "DRY_RUN":
+                    input("  Inspect the filled form in the browser, then press Enter to continue... ")
+        except LoginTimeout as exc:
+            log.error("%s. Nothing was submitted.", exc)
+            return 1
+        except Exception:
+            log.exception("Unexpected error - stopping.")
+            return 1
+        finally:
+            browser.close()
+
+    print_summary(results, log)
+    return 0 if all(r.status != "FAILED" for r in results) else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

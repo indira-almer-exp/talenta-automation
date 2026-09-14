@@ -1,7 +1,7 @@
 from datetime import date
 from pathlib import Path
 
-from talenta_attendance import DayResult, format_result, parse_args, target_dates
+from talenta_attendance import DayResult, first_line, format_result, parse_args, target_dates
 
 # 2026-09-14 is a Monday, so 14..18 are Mon..Fri and 19/20 are the weekend.
 MON, TUE, WED, THU, FRI, SAT, SUN = (date(2026, 9, d) for d in range(14, 21))
@@ -51,3 +51,11 @@ def test_format_result_failure_includes_reason_and_screenshot():
 
 def test_format_result_dry_run_aligns_like_other_statuses():
     assert format_result(DayResult(WED, "DRY_RUN")) == "2026-09-16  DRY_RUN"
+
+
+def test_first_line_keeps_only_the_first_line_and_trims():
+    assert first_line("  Attendance already exists\nSecond line  ") == "Attendance already exists"
+
+
+def test_first_line_of_empty_text_is_empty():
+    assert first_line("   \n  ") == ""
