@@ -33,6 +33,7 @@ All inside `C:\Users\indiraa\Desktop\Talenta Automation\`.
 | `talenta_selectors.py` | Every CSS selector and URL fragment the page flow depends on, as module constants |
 | `config.json` | `login_url`, `attendance_url`, `dashboard_url`, `check_in`, `check_out`, `notes`, `login_timeout_minutes` (10), `action_timeout_seconds` (15) |
 | `requirements.txt` | `playwright>=1.58`, `pytest` |
+| `pyproject.toml` | pytest configuration only (`pythonpath = ["."]`, `testpaths = ["tests"]`) so bare `pytest` works; not a packaging manifest |
 | `tests/test_dates.py` | Unit tests for the date-range function |
 | `logs/` | Created on demand; git-ignored. `run_YYYY-MM-DD_HHMMSS.log` plus `fail_YYYY-MM-DD.png` per failed day |
 | `.gitignore` | `logs/`, `__pycache__/`, `.pytest_cache/` |

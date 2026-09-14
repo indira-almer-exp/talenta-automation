@@ -17,6 +17,7 @@
 | File | Responsibility |
 |---|---|
 | `requirements.txt` | Pinned dependencies (`playwright`, `pytest`) |
+| `pyproject.toml` | pytest configuration only (`pythonpath = ["."]`, `testpaths`), so bare `pytest` finds the module; not a packaging manifest |
 | `config.json` | URLs, times, notes text, timeouts — the only file a non-programmer edits |
 | `talenta_selectors.py` | Every CSS selector / URL fragment the page flow depends on; constants only. Named `talenta_selectors`, not `selectors`, because `selectors` is a Python standard-library module that asyncio/Playwright import — shadowing it would break the program |
 | `talenta_attendance.py` | Program: `target_dates`, `parse_args`, config + logging, `DayResult`, browser steps, `submit_day`, `main` |
