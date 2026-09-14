@@ -129,7 +129,7 @@ def wait_for_login(
 def goto_attendance(page: Page, config: dict, log: logging.Logger, timeout_ms: int) -> None:
     talenta_host = urlsplit(config["attendance_url"]).netloc
     for attempt in (1, 2):
-        page.goto(config["attendance_url"])
+        page.goto(config["attendance_url"], timeout=timeout_ms)
         if sel.LOGIN_HOST not in page.url:
             try:
                 page.wait_for_selector(sel.REQUEST_BUTTON, state="visible", timeout=timeout_ms)
@@ -234,11 +234,14 @@ def click_submit(page: Page, timeout_ms: int) -> dict:
         try:
             response = route.fetch()
         except Exception:
-            route.continue_()
+            reply["lost"] = True
+            route.abort()
             return
-        reply["status"] = response.status
-        reply["body"] = response.text()
-        route.fulfill(response=response)
+        try:
+            reply["status"] = response.status
+            reply["body"] = response.text()
+        finally:
+            route.fulfill(response=response)
 
     def is_save_request(url: str) -> bool:
         return sel.SAVE_REQUEST_PATH in url
@@ -250,6 +253,10 @@ def click_submit(page: Page, timeout_ms: int) -> dict:
         with page.expect_response(lambda r: is_save_request(r.url), timeout=timeout_ms):
             page.click(sel.SUBMIT_BUTTON, timeout=timeout_ms)
     except PlaywrightTimeout as exc:
+        if reply.get("lost"):
+            raise DayFailure(
+                "Could not read Talenta's reply - check the request history before rerunning"
+            ) from exc
         message = page.evaluate("() => window.__talentaToast") or "no reply from Talenta"
         raise DayFailure(f"Submit did not go through: {message}") from exc
     finally:
@@ -267,6 +274,6 @@ def wait_for_reload(page: Page, timeout_ms: int, log: logging.Logger) -> None:
     """
     try:
         page.wait_for_function("() => !window.__talentaSubmitted", timeout=timeout_ms)
-        page.wait_for_load_state("load")
+        page.wait_for_load_state("load", timeout=timeout_ms)
     except PlaywrightTimeout:
         log.warning("Talenta accepted the request but the page did not refresh; continuing.")
