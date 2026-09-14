@@ -137,3 +137,32 @@ def test_summary_survives_a_failing_browser_close(monkeypatch, tmp_path, browser
     )
     assert ta.main(["--only", "2026-09-14"]) == 0
     assert "2026-09-14  SUBMITTED" in log_text(tmp_path)
+
+
+def test_missing_config_keys_exit_1_before_the_browser_starts(monkeypatch, capsys):
+    monkeypatch.setattr(ta, "load_config", lambda: {"login_url": "x"})
+    monkeypatch.setattr(ta, "sync_playwright", lambda: pytest.fail("the browser must not start"))
+    assert ta.main([]) == 1
+    assert "config.json is missing: dashboard_url" in capsys.readouterr().out
+
+
+def test_dry_run_days_exit_0(monkeypatch, tmp_path, browser):
+    monkeypatch.setattr(
+        ta,
+        "submit_day",
+        lambda page, day, config, dry_run, log: ta.DayResult(day, "DRY_RUN" if dry_run else "SUBMITTED"),
+    )
+    assert ta.main(["--dry-run", "--only", "2026-09-14"]) == 0
+    assert "2026-09-14  DRY_RUN" in log_text(tmp_path)
+
+
+def test_duplicate_only_dates_are_submitted_once(monkeypatch, tmp_path, browser):
+    seen = []
+
+    def submit(page, day, config, dry_run, log):
+        seen.append(day)
+        return ta.DayResult(day, "SUBMITTED")
+
+    monkeypatch.setattr(ta, "submit_day", submit)
+    assert ta.main(["--only", "2026-09-14", "--only", "2026-09-14"]) == 0
+    assert seen == [MON]

@@ -59,3 +59,10 @@ def test_first_line_keeps_only_the_first_line_and_trims():
 
 def test_first_line_of_empty_text_is_empty():
     assert first_line("   \n  ") == ""
+
+
+def test_week_spanning_a_year_boundary():
+    # 2027-01-02 is a Saturday; its week runs Mon 2026-12-28 .. Fri 2027-01-01.
+    assert target_dates(date(2027, 1, 2)) == [
+        date(2026, 12, 28), date(2026, 12, 29), date(2026, 12, 30), date(2026, 12, 31), date(2027, 1, 1)
+    ]

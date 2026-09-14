@@ -51,12 +51,26 @@ def load_config(path: Path = ROOT / "config.json") -> dict:
         return json.load(f)
 
 
+REQUIRED_CONFIG_KEYS = (
+    "login_url",
+    "dashboard_url",
+    "attendance_url",
+    "check_in",
+    "check_out",
+    "notes",
+    "login_timeout_minutes",
+    "action_timeout_seconds",
+)
+
+
 def setup_logger() -> logging.Logger:
     """INFO to the console, DEBUG (including tracebacks) to logs/run_*.log."""
     LOG_DIR.mkdir(exist_ok=True)
     log_path = LOG_DIR / f"run_{datetime.now():%Y-%m-%d_%H%M%S}.log"
     logger = logging.getLogger("talenta")
     logger.setLevel(logging.DEBUG)
+    for handler in logger.handlers:
+        handler.close()
     logger.handlers.clear()
     logger.propagate = False
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%H:%M:%S")
@@ -95,6 +109,11 @@ def print_summary(results: list[DayResult], log: logging.Logger) -> None:
         log.info(format_result(result))
 
 
+def first_line(text: str) -> str:
+    text = text.strip()
+    return text.splitlines()[0] if text else ""
+
+
 # ---- Browser steps (verified against the live page by the dry run) ----
 
 
@@ -129,7 +148,7 @@ def wait_for_login(
 def goto_attendance(page: Page, config: dict, log: logging.Logger, timeout_ms: int) -> None:
     talenta_host = urlsplit(config["attendance_url"]).netloc
     for attempt in (1, 2):
-        page.goto(config["attendance_url"], timeout=timeout_ms)
+        page.goto(config["attendance_url"], timeout=timeout_ms, wait_until="domcontentloaded")
         if sel.LOGIN_HOST not in page.url:
             try:
                 page.wait_for_selector(sel.REQUEST_BUTTON, state="visible", timeout=timeout_ms)
@@ -148,8 +167,10 @@ def open_request_modal(page: Page, timeout_ms: int) -> None:
     page.click(sel.REQUEST_BUTTON, timeout=timeout_ms)
     page.wait_for_selector(sel.MODAL, state="visible", timeout=timeout_ms)
     page.click(sel.ATTENDANCE_RADIO_LABEL, timeout=timeout_ms)
-    if not page.locator(sel.ATTENDANCE_RADIO).is_checked():
-        raise DayFailure("Could not select the 'Attendance' request type")
+    try:
+        expect(page.locator(sel.ATTENDANCE_RADIO)).to_be_checked(timeout=timeout_ms)
+    except AssertionError as exc:
+        raise DayFailure("Could not select the 'Attendance' request type") from exc
 
 
 SET_DATE_JS = """([selector, year, month, day]) => {
@@ -192,8 +213,10 @@ def verify_prefilled(page: Page, day: date, timeout_ms: int) -> None:
     _expect_value(page, sel.CHECKIN_DATE_SELECT, iso, "Check In date", timeout_ms)
     _expect_value(page, sel.CHECKOUT_DATE_SELECT, iso, "Check Out date", timeout_ms)
     for selector, what in ((sel.CHECKIN_BOX, "Check In"), (sel.CHECKOUT_BOX, "Check Out")):
-        if not page.locator(selector).is_checked():
-            raise DayFailure(f"{what} box is not ticked")
+        try:
+            expect(page.locator(selector)).to_be_checked(timeout=timeout_ms)
+        except AssertionError as exc:
+            raise DayFailure(f"{what} box is not ticked") from exc
 
 
 def fill_times_and_notes(page: Page, config: dict) -> None:
@@ -211,12 +234,14 @@ def fill_times_and_notes(page: Page, config: dict) -> None:
 CAPTURE_TOAST_JS = """(selector) => {
     window.__talentaToast = null;
     new MutationObserver(() => {
-        const el = document.querySelector(selector);
-        if (el && !window.__talentaToast) window.__talentaToast = el.innerText.trim();
+        const toasts = document.querySelectorAll(selector);
+        if (toasts.length) window.__talentaToast = toasts[toasts.length - 1].innerText.trim();
     }).observe(document.body, {childList: true, subtree: true});
 }"""
 
 MARK_DOCUMENT_JS = "() => { window.__talentaSubmitted = true; }"
+
+UNKNOWN_RESULT = "Submit result unknown - check Talenta's request history before rerunning this date"
 
 
 def click_submit(page: Page, timeout_ms: int) -> dict:
@@ -226,20 +251,23 @@ def click_submit(page: Page, timeout_ms: int) -> dict:
     the instant it gets an OK, which can discard the body before we could read
     it afterwards. The toast observer is armed first because validation toasts
     vanish after ~3 s, and the document marker lets wait_for_reload tell the
-    old document from the reloaded one.
+    old document from the reloaded one. Once `captured["sent"]` is set the POST
+    has left the browser, so any failure after that must not be reported as
+    "not submitted".
     """
-    reply: dict = {}
+    captured: dict = {}
 
     def capture(route) -> None:
+        captured["sent"] = True
         try:
             response = route.fetch()
         except Exception:
-            reply["lost"] = True
+            captured["lost"] = True
             route.abort()
             return
         try:
-            reply["status"] = response.status
-            reply["body"] = response.text()
+            captured["status"] = response.status
+            captured["body"] = response.text()
         finally:
             route.fulfill(response=response)
 
@@ -253,18 +281,21 @@ def click_submit(page: Page, timeout_ms: int) -> dict:
         with page.expect_response(lambda r: is_save_request(r.url), timeout=timeout_ms):
             page.click(sel.SUBMIT_BUTTON, timeout=timeout_ms)
     except PlaywrightTimeout as exc:
-        if reply.get("lost"):
-            raise DayFailure(
-                "Could not read Talenta's reply - check the request history before rerunning"
-            ) from exc
-        message = page.evaluate("() => window.__talentaToast") or "no reply from Talenta"
-        raise DayFailure(f"Submit did not go through: {message}") from exc
+        toast = page.evaluate("() => window.__talentaToast")
+        if not captured.get("sent"):
+            raise DayFailure(f"Submit did not go through: {toast or 'no message shown'}") from exc
+        detail = f"Talenta said: {toast}" if toast else "no reply within the time limit"
+        raise DayFailure(f"{UNKNOWN_RESULT} ({detail})") from exc
     finally:
         page.unroute(is_save_request, capture)
     try:
-        return json.loads(reply["body"])
+        reply = json.loads(captured["body"])
     except (KeyError, json.JSONDecodeError) as exc:
-        raise DayFailure(f"Talenta replied HTTP {reply.get('status', '?')}, not JSON") from exc
+        status = captured.get("status", "?")
+        raise DayFailure(f"{UNKNOWN_RESULT} (HTTP {status} without a readable result)") from exc
+    if not isinstance(reply, dict):
+        raise DayFailure(f"{UNKNOWN_RESULT} (unexpected reply {first_line(str(reply))[:100]})")
+    return reply
 
 
 def wait_for_reload(page: Page, timeout_ms: int, log: logging.Logger) -> None:
@@ -275,13 +306,8 @@ def wait_for_reload(page: Page, timeout_ms: int, log: logging.Logger) -> None:
     try:
         page.wait_for_function("() => !window.__talentaSubmitted", timeout=timeout_ms)
         page.wait_for_load_state("load", timeout=timeout_ms)
-    except PlaywrightTimeout:
+    except Exception:
         log.warning("Talenta accepted the request but the page did not refresh; continuing.")
-
-
-def first_line(text: str) -> str:
-    text = text.strip()
-    return text.splitlines()[0] if text else ""
 
 
 def record_failure(page: Page, day: date, reason: str, log: logging.Logger) -> DayResult:
@@ -330,18 +356,6 @@ def submit_day(page: Page, day: date, config: dict, dry_run: bool, log: logging.
         return record_failure(page, day, reason, log)
 
 
-REQUIRED_CONFIG_KEYS = (
-    "login_url",
-    "dashboard_url",
-    "attendance_url",
-    "check_in",
-    "check_out",
-    "notes",
-    "login_timeout_minutes",
-    "action_timeout_seconds",
-)
-
-
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -354,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config.json is missing: {', '.join(missing)}")
         return 1
     log = setup_logger()
-    dates = args.only or target_dates(date.today())
+    dates = list(dict.fromkeys(args.only)) if args.only else target_dates(date.today())
     log.info("Target dates: %s", ", ".join(d.isoformat() for d in dates))
     if args.dry_run:
         log.info("DRY RUN - Submit will not be clicked.")
@@ -366,15 +380,15 @@ def main(argv: list[str] | None = None) -> int:
             browser = playwright.chromium.launch(headless=False)
             page = browser.new_page()
             page.set_default_timeout(config["action_timeout_seconds"] * 1_000)
-            page.goto(config["login_url"])
+            page.goto(config["login_url"], wait_until="domcontentloaded")
             wait_for_login(page, config, log)
             for day in dates:
                 results.append(submit_day(page, day, config, args.dry_run, log))
-                if results[-1].status == "DRY_RUN" and sys.stdin is not None and sys.stdin.isatty():
-                    input("  Inspect the filled form in the browser, then press Enter to continue... ")
                 if page.is_closed():
                     log.error("The browser window was closed - stopping.")
                     break
+                if results[-1].status == "DRY_RUN" and sys.stdin is not None and sys.stdin.isatty():
+                    input("  Inspect the filled form in the browser, then press Enter to continue... ")
         except LoginTimeout as exc:
             if results:
                 log.error("%s. Stopping - see the summary for what was already submitted.", exc)
