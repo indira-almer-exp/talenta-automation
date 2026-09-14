@@ -140,6 +140,8 @@ Taken from the saved attendance page and Talenta's `scriptEmployeeAttendance.js`
 | `CANCEL_BUTTON` | `#modalReqAttendance .custom-cancel-btn` |
 | `SHIFT_LOOKUP_PATH` | `/attendance/get-current-shift` |
 | `SAVE_REQUEST_PATH` | `/attendance/save-request` |
+| `LOGIN_HOST` | `account.mekari.com` (URL substring meaning "bounced to login") |
+| `TOAST` | `#toast-container .toast` (Materialize toast, read when Submit is blocked client-side) |
 
 Materialize hides native `<select>`, radio and checkbox inputs, so the script
 reads their values through `input_value()` / `is_checked()` / `evaluate`
