@@ -262,7 +262,6 @@ def click_submit(page: Page, timeout_ms: int) -> dict:
         try:
             response = route.fetch(timeout=timeout_ms * 2)
         except Exception:
-            captured["lost"] = True
             route.abort()
             return
         try:
@@ -286,12 +285,18 @@ def click_submit(page: Page, timeout_ms: int) -> dict:
     finally:
         # Removing the route while route.fetch() is still pending lets Chromium
         # release the original request as well, i.e. the POST would go out twice.
-        page.unroute_all(behavior="wait")
+        # This is the page's only route, so unroute_all is safe.
+        try:
+            page.unroute_all(behavior="wait")
+        except Exception as exc:
+            if captured.get("sent"):
+                raise DayFailure(f"{UNKNOWN_RESULT} (browser error while waiting for the reply)") from exc
+            raise
     if "body" not in captured:
         toast = page.evaluate("() => window.__talentaToast")
         if not captured.get("sent"):
             raise DayFailure(f"Submit did not go through: {toast or 'no message shown'}") from timed_out
-        detail = f"Talenta said: {toast}" if toast else "no reply within the time limit"
+        detail = f"the page showed: {toast}" if toast else "no reply within the time limit"
         raise DayFailure(f"{UNKNOWN_RESULT} ({detail})") from timed_out
     try:
         reply = json.loads(captured["body"])
@@ -372,6 +377,11 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         print(f"config.json is missing: {', '.join(missing)}")
         return 1
+    for key in ("login_timeout_minutes", "action_timeout_seconds"):
+        value = config[key]
+        if not isinstance(value, (int, float)) or value <= 0:
+            print(f"config.json: {key} must be a positive number, got {value!r}")
+            return 1
     log = setup_logger()
     dates = list(dict.fromkeys(args.only)) if args.only else target_dates(date.today())
     log.info("Target dates: %s", ", ".join(d.isoformat() for d in dates))

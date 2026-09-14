@@ -166,3 +166,11 @@ def test_duplicate_only_dates_are_submitted_once(monkeypatch, tmp_path, browser)
     monkeypatch.setattr(ta, "submit_day", submit)
     assert ta.main(["--only", "2026-09-14", "--only", "2026-09-14"]) == 0
     assert seen == [MON]
+
+
+def test_non_numeric_timeout_in_config_exits_1(monkeypatch, capsys):
+    config = {key: 1 for key in ta.REQUIRED_CONFIG_KEYS} | {"action_timeout_seconds": "15"}
+    monkeypatch.setattr(ta, "load_config", lambda: config)
+    monkeypatch.setattr(ta, "sync_playwright", lambda: pytest.fail("the browser must not start"))
+    assert ta.main([]) == 1
+    assert "action_timeout_seconds must be a positive number" in capsys.readouterr().out
