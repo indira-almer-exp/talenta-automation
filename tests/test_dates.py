@@ -1,7 +1,9 @@
 from datetime import date
+from pathlib import Path
 
-from talenta_attendance import parse_args, target_dates
+from talenta_attendance import DayResult, format_result, parse_args, target_dates
 
+# 2026-09-14 is a Monday, so 14..18 are Mon..Fri and 19/20 are the weekend.
 MON, TUE, WED, THU, FRI, SAT, SUN = (date(2026, 9, d) for d in range(14, 21))
 
 
@@ -35,3 +37,14 @@ def test_parse_args_only_is_repeatable_and_parsed_as_dates():
     args = parse_args(["--dry-run", "--only", "2026-09-14", "--only", "2026-09-16"])
     assert args.dry_run is True
     assert args.only == [MON, WED]
+
+
+def test_format_result_success_has_no_trailing_noise():
+    assert format_result(DayResult(MON, "SUBMITTED")) == "2026-09-14  SUBMITTED"
+
+
+def test_format_result_failure_includes_reason_and_screenshot():
+    result = DayResult(TUE, "FAILED", "Shift dropdown stayed empty", Path("logs/fail_2026-09-15.png"))
+    assert format_result(result) == (
+        "2026-09-15  FAILED      Shift dropdown stayed empty  logs\\fail_2026-09-15.png"
+    )
