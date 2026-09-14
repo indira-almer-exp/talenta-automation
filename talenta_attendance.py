@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout, expect, sync_playwright
 
@@ -125,26 +126,28 @@ def wait_for_login(
     log.info("Logged in.")
 
 
-def goto_attendance(page: Page, config: dict, log: logging.Logger) -> None:
+def goto_attendance(page: Page, config: dict, log: logging.Logger, timeout_ms: int) -> None:
+    talenta_host = urlsplit(config["attendance_url"]).netloc
     for attempt in (1, 2):
         page.goto(config["attendance_url"])
         if sel.LOGIN_HOST not in page.url:
             try:
-                page.wait_for_selector(sel.REQUEST_BUTTON, state="visible")
+                page.wait_for_selector(sel.REQUEST_BUTTON, state="visible", timeout=timeout_ms)
                 return
             except PlaywrightTimeout as exc:
                 if sel.LOGIN_HOST not in page.url:
                     raise DayFailure("The attendance page did not load (no Request button)") from exc
         if attempt == 2:
-            raise DayFailure("Still on the login page after logging in again")
+            break
         log.warning("Session expired - please log in again.")
-        wait_for_login(page, config, log, ready=lambda url: sel.LOGIN_HOST not in url)
+        wait_for_login(page, config, log, ready=lambda url: urlsplit(url).netloc == talenta_host)
+    raise DayFailure("Still on the login page after logging in again")
 
 
-def open_request_modal(page: Page) -> None:
-    page.click(sel.REQUEST_BUTTON)
-    page.wait_for_selector(sel.MODAL, state="visible")
-    page.click(sel.ATTENDANCE_RADIO_LABEL)
+def open_request_modal(page: Page, timeout_ms: int) -> None:
+    page.click(sel.REQUEST_BUTTON, timeout=timeout_ms)
+    page.wait_for_selector(sel.MODAL, state="visible", timeout=timeout_ms)
+    page.click(sel.ATTENDANCE_RADIO_LABEL, timeout=timeout_ms)
     if not page.locator(sel.ATTENDANCE_RADIO).is_checked():
         raise DayFailure("Could not select the 'Attendance' request type")
 
@@ -205,10 +208,10 @@ def fill_times_and_notes(page: Page, config: dict) -> None:
     page.fill(sel.NOTES, config["notes"])
 
 
-CAPTURE_TOAST_JS = """() => {
+CAPTURE_TOAST_JS = """(selector) => {
     window.__talentaToast = null;
     new MutationObserver(() => {
-        const el = document.querySelector('#toast-container .toast');
+        const el = document.querySelector(selector);
         if (el && !window.__talentaToast) window.__talentaToast = el.innerText.trim();
     }).observe(document.body, {childList: true, subtree: true});
 }"""
@@ -219,26 +222,51 @@ MARK_DOCUMENT_JS = "() => { window.__talentaSubmitted = true; }"
 def click_submit(page: Page, timeout_ms: int) -> dict:
     """Click Submit and return Talenta's JSON reply ({"result": "OK", "errorMsg": ...}).
 
-    The toast observer is armed first because Talenta's validation toasts vanish
-    after ~3 s, long before our timeout; the document marker lets wait_for_reload
-    tell the old document from the reloaded one.
+    The reply body is captured on its way to the page: Talenta reloads the page
+    the instant it gets an OK, which can discard the body before we could read
+    it afterwards. The toast observer is armed first because validation toasts
+    vanish after ~3 s, and the document marker lets wait_for_reload tell the
+    old document from the reloaded one.
     """
-    page.evaluate(CAPTURE_TOAST_JS)
+    reply: dict = {}
+
+    def capture(route) -> None:
+        try:
+            response = route.fetch()
+        except Exception:
+            route.continue_()
+            return
+        reply["status"] = response.status
+        reply["body"] = response.text()
+        route.fulfill(response=response)
+
+    def is_save_request(url: str) -> bool:
+        return sel.SAVE_REQUEST_PATH in url
+
+    page.evaluate(CAPTURE_TOAST_JS, sel.TOAST)
     page.evaluate(MARK_DOCUMENT_JS)
+    page.route(is_save_request, capture)
     try:
-        with page.expect_response(lambda r: sel.SAVE_REQUEST_PATH in r.url, timeout=timeout_ms) as info:
-            page.click(sel.SUBMIT_BUTTON)
+        with page.expect_response(lambda r: is_save_request(r.url), timeout=timeout_ms):
+            page.click(sel.SUBMIT_BUTTON, timeout=timeout_ms)
     except PlaywrightTimeout as exc:
         message = page.evaluate("() => window.__talentaToast") or "no reply from Talenta"
         raise DayFailure(f"Submit did not go through: {message}") from exc
-    response = info.value
+    finally:
+        page.unroute(is_save_request, capture)
     try:
-        return response.json()
-    except Exception as exc:
-        raise DayFailure(f"Talenta replied HTTP {response.status}, not JSON") from exc
+        return json.loads(reply["body"])
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise DayFailure(f"Talenta replied HTTP {reply.get('status', '?')}, not JSON") from exc
 
 
-def wait_for_reload(page: Page, timeout_ms: int) -> None:
-    """On success Talenta calls location.reload(); wait until the fresh page is up."""
-    page.wait_for_function("() => !window.__talentaSubmitted", timeout=timeout_ms)
-    page.wait_for_load_state("load")
+def wait_for_reload(page: Page, timeout_ms: int, log: logging.Logger) -> None:
+    """On success Talenta calls location.reload(); wait until the fresh page is up.
+
+    Relies on the marker set by click_submit; without it this returns at once.
+    """
+    try:
+        page.wait_for_function("() => !window.__talentaSubmitted", timeout=timeout_ms)
+        page.wait_for_load_state("load")
+    except PlaywrightTimeout:
+        log.warning("Talenta accepted the request but the page did not refresh; continuing.")
