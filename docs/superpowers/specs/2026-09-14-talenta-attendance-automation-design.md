@@ -114,7 +114,11 @@ Steps, using the selectors in section 5:
      `location.reload()` the instant it receives OK and Chromium may discard
      the response before it could be read afterwards. If `route.fetch()`
      itself fails the handler `abort()`s so the POST is never re-sent.
-   - Click `SUBMIT_BUTTON` inside `page.expect_response(...)`.
+   - Click `SUBMIT_BUTTON` inside `page.expect_response(...)`. Afterwards the
+     route is removed with `unroute_all(behavior="wait")`: dropping a route
+     while its `route.fetch()` is still pending makes Chromium release the
+     original request as well, which would send the POST twice. A reply that
+     arrives after the wait is still used as the result.
    - `result == "OK"` → wait until the marker is gone (the reload happened) and
      the new document is loaded; if that never happens, log a warning and still
      return `SUBMITTED` (the OK reply already proved acceptance).
