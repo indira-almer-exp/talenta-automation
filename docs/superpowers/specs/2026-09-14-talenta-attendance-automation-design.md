@@ -30,7 +30,7 @@ All inside `C:\Users\indiraa\Desktop\Talenta Automation\`.
 | `run_attendance.bat` | Double-click entry point. Runs `python talenta_attendance.py`, then `pause` so the log stays readable |
 | `run_attendance_dryrun.bat` | Same, with `--dry-run` |
 | `talenta_attendance.py` | The program: argument parsing, date logic, browser control, per-day form flow, summary |
-| `selectors.py` | Every CSS selector and URL fragment the page flow depends on, as module constants |
+| `talenta_selectors.py` | Every CSS selector and URL fragment the page flow depends on, as module constants |
 | `config.json` | `login_url`, `attendance_url`, `dashboard_url`, `check_in`, `check_out`, `notes`, `login_timeout_minutes` (10), `action_timeout_seconds` (15) |
 | `requirements.txt` | `playwright>=1.58`, `pytest` |
 | `tests/test_dates.py` | Unit tests for the date-range function |
@@ -119,7 +119,7 @@ Printed at the end and written to the log, one line per date:
 
 Exit code 0 if every date is `SUBMITTED`/`DRY_RUN`, 2 if any failed.
 
-## 5. Selectors (`selectors.py`)
+## 5. Selectors (`talenta_selectors.py`)
 
 Taken from the saved attendance page and Talenta's `scriptEmployeeAttendance.js`.
 
