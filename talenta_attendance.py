@@ -370,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
             wait_for_login(page, config, log)
             for day in dates:
                 results.append(submit_day(page, day, config, args.dry_run, log))
-                if results[-1].status == "DRY_RUN" and sys.stdin.isatty():
+                if results[-1].status == "DRY_RUN" and sys.stdin is not None and sys.stdin.isatty():
                     input("  Inspect the filled form in the browser, then press Enter to continue... ")
                 if page.is_closed():
                     log.error("The browser window was closed - stopping.")
@@ -385,12 +385,17 @@ def main(argv: list[str] | None = None) -> int:
             log.exception("Unexpected error - stopping.")
             return 1
         finally:
-            if browser is not None:
-                browser.close()
             if results:
                 print_summary(results, log)
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    log.debug("Closing the browser failed", exc_info=True)
 
-    return 0 if all(r.status != "FAILED" for r in results) else 2
+    if len(results) < len(dates) or any(r.status == "FAILED" for r in results):
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

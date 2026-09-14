@@ -1,6 +1,8 @@
 import logging
 from datetime import date
 
+import pytest
+
 import talenta_attendance as ta
 
 MON = date(2026, 9, 14)
@@ -68,3 +70,28 @@ def test_unexpected_error_without_message_has_no_dangling_colon(monkeypatch):
     monkeypatch.setattr(ta, "verify_prefilled", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
     result = ta.submit_day(StubPage(), MON, CONFIG, False, LOG)
     assert (result.status, result.reason) == ("FAILED", "RuntimeError")
+
+
+def test_login_timeout_aborts_instead_of_being_recorded(monkeypatch):
+    stub_steps(monkeypatch, None)
+
+    def expired(*args, **kwargs):
+        raise ta.LoginTimeout("Login not completed within 10 minutes")
+
+    monkeypatch.setattr(ta, "goto_attendance", expired)
+    with pytest.raises(ta.LoginTimeout):
+        ta.submit_day(StubPage(), MON, CONFIG, False, LOG)
+
+
+def test_ok_reply_without_message_logs_plain_submitted(monkeypatch, caplog):
+    stub_steps(monkeypatch, {"result": "OK"})
+    with caplog.at_level(logging.INFO, logger="test"):
+        ta.submit_day(StubPage(), MON, CONFIG, False, LOG)
+    assert "Submitted" in caplog.text
+    assert "Submitted:" not in caplog.text
+
+
+def test_long_rejection_is_truncated(monkeypatch):
+    stub_steps(monkeypatch, {"result": "FAILED", "errorMsg": "x" * 500})
+    result = ta.submit_day(StubPage(), MON, CONFIG, False, LOG)
+    assert result.reason == "Talenta rejected the request: " + "x" * 200
